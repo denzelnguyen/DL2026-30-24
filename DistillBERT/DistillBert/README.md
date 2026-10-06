@@ -1,0 +1,165 @@
+# Knowledge Distillation: How Small Can a Neural Network Become?
+
+Teacher: **BERT-base** (pretrained, fine-tuned on SST-2).
+Student: **DistilBERT architecture**, trained on SST-2 from random weights, with and
+without the teacher's help. Dataset: SST-2 from Hugging Face (GLUE).
+We study the trade-off between **model size**, **computational efficiency** and
+**prediction performance**, and measure **how much the student learned from the teacher**.
+
+## 1. Experimental design
+
+| Model | Weights at start | Trained with | lr | epochs |
+|---|---|---|---|---|
+| Teacher (BERT-base, 12 layers, ~109.5M) | pretrained | hard labels (fine-tuning) | 2e-5 | 3 |
+| Student baseline (DistilBERT, 6 layers, ~67.0M) | **random** | hard labels only | 1e-4 | 10 |
+| Student distilled (same architecture) | **random**, identical to baseline | hard labels + teacher | 1e-4 | 10 |
+| *(optional reference)* pretrained DistilBERT, baseline and distilled | pretrained | as above | 5e-5 | 3 |
+
+* Baseline and distilled students share architecture, data, seed, initial weights,
+  learning rate and epochs. The **only** difference is the loss, so
+  `distilled - baseline` is exactly what the teacher contributed.
+* `teacher - distilled` is what is still lost by shrinking the model.
+* `--layers 4` / `--layers 2` builds smaller from-scratch students ("how small can it become?").
+* Why lr differs: a pretrained model is only adjusted, so it needs a small step (large steps
+  erase pretrained knowledge). A random model must learn everything, so it needs larger
+  steps and more epochs. 1e-4 / 10 epochs are sensible starting values, not tuned optima.
+
+## 2. Why distillation was invented
+
+**The problem.** Large models are accurate but expensive: memory, latency, energy and
+serving cost, and often impossible on phones or edge devices. Simply training a small model
+on the same labels gives a clearly worse model, because a small model is harder to optimise
+and a hard label carries little information (for a binary task, one bit per example).
+
+**The idea and its history.**
+* Bucila, Caruana & Niculescu-Mizil (2006), *Model Compression*: compress a big ensemble into
+  one small network by training the small network on the ensemble's outputs.
+* Ba & Caruana (2014), *Do Deep Nets Really Need to Be Deep?*: a shallow network trained to
+  match a deep network's logits can be far better than the same network trained on labels.
+* Hinton, Vinyals & Dean (2015), *Distilling the Knowledge in a Neural Network*: named and
+  formalised the method, with temperature-softened probabilities as targets. The name comes
+  from separating the "knowledge" a big model extracted from data from the heavy form it
+  needed in order to learn it. Training can use a big, slow model; deployment can use a small one.
+* Sanh et al. (2019), *DistilBERT*: applied it to BERT, reporting about 40% fewer parameters,
+  about 60% faster inference and about 97% of BERT's GLUE performance retained.
+
+**Why it works: "dark knowledge".** A label says only "this sentence is positive". The teacher
+says "positive, 0.98" for one sentence and "positive, 0.62" for another. That tells the student
+which examples are clear and which are borderline, and how the classes relate (Hinton's
+example: a BMW photo is more likely mistaken for a truck than for a carrot). Every example
+therefore carries much more information, gradients are less noisy, and the targets act like a
+regulariser (similar to label smoothing, but informed by a real model). This is especially
+valuable for a student trained from scratch on a small dataset, which cannot discover this
+structure on its own.
+
+**What it cannot do.** The student's capacity is limited, so it will not match the teacher
+exactly; the teacher's mistakes can be copied (that is what the hard-label term protects
+against); and a from-scratch student has no pretraining, so some gap to a pretrained teacher
+remains.
+
+## 3. The loss
+
+```
+loss = alpha * CE(student, label)
+     + (1 - alpha) * T^2 * KL( softmax(teacher/T) || softmax(student/T) )
+     + beta * (1 - cosine(student_hidden, teacher_hidden))        # optional
+```
+
+Temperature example. Teacher logits `[-1.0, 2.0]`:
+T = 1 gives `[0.047, 0.953]` (almost a hard label); T = 2 gives `[0.182, 0.818]`. A higher T
+exposes the relative judgement between classes, which is the information the student needs.
+Soft-target gradients shrink by about `1/T^2`, so the loss is multiplied by `T^2` to keep it
+balanced against the cross-entropy term (Hinton et al., 2015).
+
+## 4. Why these functions and not others
+
+| Choice | Alternative | Reason |
+|---|---|---|
+| `from_config` (student, scratch) | `from_pretrained` | builds the architecture with random weights: a true from-scratch student |
+| DistilBERT architecture | custom small transformer | the standard 6-layer BERT, same hidden size and vocabulary as the teacher, supported by the same Hugging Face classes |
+| One tokenizer (bert-base-uncased) | separate tokenizers | both models read identical token ids, so outputs are comparable sentence by sentence |
+| `return_token_type_ids=False` | keep them | DistilBERT rejects token types; for single sentences BERT's are all zero anyway |
+| `AutoModelForSequenceClassification` | `BertModel` + own head | includes the head, computes CE from labels, saves/loads in one call |
+| `Trainer` | own PyTorch loop | fp16, evaluation, checkpoints, best-model selection; only `compute_loss` is overridden |
+| `DataCollatorWithPadding` | pad to 128 | SST-2 sentences are short; per-batch padding saves compute with identical results |
+| KL divergence with temperature | MSE on logits, labels only | compares full probability distributions; soft targets carry dark knowledge |
+| `T^2` factor | none | keeps KD gradients comparable to CE |
+| `alpha` mixing | teacher loss only | the true label protects against teacher mistakes |
+| cosine loss on last hidden state (`--beta`) | none | aligns internal representations (DistilBERT's third loss); possible because both are 768-dimensional |
+| `teacher.eval()`, `requires_grad=False`, `no_grad` | trainable teacher | teacher stays fixed and uses no gradient memory |
+| warmup 10% + linear decay, weight decay 0.01 | constant lr | stabilises training of transformers |
+| plain CE for every `eval_loss` | combined loss | makes validation loss directly comparable across models |
+| validation set for reporting | test set | GLUE test labels are not public |
+| agreement + KL + latency + size | accuracy only | the question is a trade-off and "how much was learned from the teacher" |
+
+## 5. Run on Kaggle (GPU + Internet on)
+
+```python
+# Cell 1 - code (the GitHub repo root IS the Bert folder, so do NOT cd into it)
+%cd /kaggle/working
+!rm -rf Bert
+!git clone https://github.com/<user>/Bert.git
+!pip install -q transformers datasets evaluate accelerate
+
+# Cell 2 - sanity check: all files must be the same version
+!ls /kaggle/working/Bert
+!python -c "import inspect; from Bert.model_student import build_student; print(inspect.signature(build_student))"
+# expected: (init='scratch', num_layers=6)
+
+# Cell 3+ - step by step (stay in /kaggle/working)
+!python -m Bert.train_teacher
+!python -m Bert.train_student
+!python -m Bert.train_distill
+!python -m Bert.benchmark
+!python -m Bert.plot_curves
+
+# or everything at once:
+!python -m Bert.run_all                                  # from-scratch student, 6 layers
+!python -m Bert.run_all --layers 2 4 6 --inits scratch pretrained   # full study
+```
+
+Outputs: `outputs/comparison.csv|json|png`, `outputs/learning_curves.png`, and
+`log_history.json` (loss, ce_loss, kd_loss, learning_rate, accuracy) in every model folder.
+Zip before the session ends: `!zip -rq outputs.zip outputs`.
+
+## 6. Reading the results, and why the numbers come out this way
+
+The numbers below are **expectations from the literature and from how the models are built,
+not measurements**; replace them with the values from `comparison.csv`.
+
+* **Parameters (exact arithmetic).** One transformer layer has about 7.1M parameters. BERT-base:
+  12 layers (about 85M) plus embeddings and head, about 109.5M. DistilBERT: 6 layers (about 42.5M)
+  plus the same-sized embeddings (about 23.8M) and head, about 67.0M. The embeddings are not
+  shrunk, so removing half the layers removes about 39%, not 50%, of the parameters.
+* **Latency.** Time grows roughly with the number of layers, so a 6-layer student is expected
+  to be somewhere between about 1.5x and 2x faster than the 12-layer teacher (fixed overheads
+  keep it below 2x). 4 and 2 layers are expected to be faster still.
+* **Teacher accuracy.** Fine-tuned BERT-base typically reaches about 92-93% on SST-2
+  validation; the reason is pretraining on huge amounts of text.
+* **Pretrained DistilBERT** is reported at about 91% (Sanh et al., 2019): close to the teacher.
+* **From-scratch student.** Without pretraining it has to learn language from about 67k short
+  examples, so it is expected to land clearly below the teacher; that gap is the price of no
+  pretraining, not a bug.
+* **Distilled vs baseline.** The distilled student is expected to be at least as good as the
+  baseline, with higher `agreement_with_teacher` and lower `kl_to_teacher`: KL to the teacher is
+  exactly what distillation minimises. The accuracy gain may be small; if it is within noise,
+  say so in the report.
+* **Loss.** `val_ce_loss` is plain cross-entropy for every model. The teacher is expected to
+  have the lowest. During training the distilled student's `loss` is a mixture, so read its
+  `ce_loss` and `kd_loss` columns in `log_history.json` instead.
+
+## 7. Getting the student closer to the teacher
+
+Change one setting at a time and compare accuracy, `agreement_with_teacher`, `kl_to_teacher`:
+`--temperature` {1, 2, 4}, `--alpha` {0.3, 0.5, 0.7}, `--beta` {0, 1}, `--lr` {5e-5, 1e-4, 2e-4},
+`--epochs` {10, 15}. A from-scratch student usually benefits from a lower alpha (more weight on
+the teacher) and from `--beta 1`.
+
+## 8. Limitations
+
+* One run per setting. SST-2 validation has only 872 sentences (standard error about 1 point at
+  90% accuracy), so differences below about 1 point are inconclusive unless repeated with
+  several seeds (`SEED` in `config.py`).
+* Latency depends on the GPU; report ratios (`speedup_x`), not absolute values.
+* The code was syntax-checked but not executed end-to-end in the authoring environment (no GPU
+  or Hugging Face access). Run it once on Kaggle and fix any environment-specific error.

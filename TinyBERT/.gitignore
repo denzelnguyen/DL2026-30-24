@@ -1,0 +1,16 @@
+# Model weights (too large for GitHub) - share via Hugging Face Hub / Google Drive
+checkpoints/
+distilled_student_*/
+*.safetensors
+*.bin
+*.pt
+
+# Python / Jupyter
+__pycache__/
+.ipynb_checkpoints/
+*.pyc
+
+# Misc
+data/
+.env
+.venv/
