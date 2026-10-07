@@ -15,7 +15,7 @@
 | 1   | DistilBERT      | Response-based & Cosine Hidden KD                 | `1_distilbert/`   | ✅ Completed       |
 | 2   | TinyBERT        | Two-stage Transformer Distillation                | `2_tinybert/`     | ✅ Completed       |
 | 3   | MobileBERT      | Bottleneck Layer-wise KD                          | `3_mobilebert/`   | ✅ Completed       |
-| 4   | PKD-BERT        | Patient Knowledge Distillation                    | `4_pkd_bert/`     | ⏳ Pending Upload  |
+| 4   | PKD-BERT        | Patient Knowledge Distillation                    | `4_pkd_bert/`     | ✅ Completed       |
 | 5   | MiniLM          | Self-Attention & Value-Relation Matrix KD         | `5_minilm/`       | ✅ Completed       |
 
 ---
