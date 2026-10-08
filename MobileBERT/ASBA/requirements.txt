@@ -1,0 +1,7 @@
+# Kaggle already has all of these; this is only for running elsewhere.
+torch
+transformers
+datasets
+scikit-learn
+pandas
+matplotlib
